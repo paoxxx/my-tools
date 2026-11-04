@@ -1,0 +1,28 @@
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+
+contextBridge.exposeInMainWorld('api', {
+  list: () => ipcRenderer.invoke('notes:list'),
+  load: (id) => ipcRenderer.invoke('notes:load', id),
+  save: (doc) => ipcRenderer.invoke('notes:save', doc),
+  saveSync: (doc) => ipcRenderer.sendSync('notes:saveSync', doc),
+  remove: (id) => ipcRenderer.invoke('notes:remove', id),
+  exportPDF: (doc, assets, mode, opts) => ipcRenderer.invoke('export:pdf', doc, assets, mode, opts),
+  saveAsset: (ref, url) => ipcRenderer.invoke('asset:save', ref, url),
+  clipText: () => ipcRenderer.invoke('clip:text'),
+  relaunch: () => ipcRenderer.send('app:relaunch'),
+  setKeys: (map) => ipcRenderer.send('keys:set', map),
+  setWinSize: (w, h) => ipcRenderer.invoke('win:size', w, h),
+  winRatio: (on) => ipcRenderer.invoke('win:ratio', on),
+  isStale: () => ipcRenderer.invoke('app:stale'),
+  loadAsset: (ref) => ipcRenderer.invoke('asset:load', ref),
+  copyImage: (url) => ipcRenderer.send('clip:image', url),
+  onMenu: (cb) => ipcRenderer.on('menu', (e, action, arg) => cb(action, arg)),
+  onExportDoc: (cb) => ipcRenderer.on('export:doc', (e, doc, assets, opts) => cb(doc, assets, opts)),
+  exportReady: (info) => ipcRenderer.send('export:ready', info),
+  fontList: () => ipcRenderer.invoke('fonts:list'),
+  fontData: (id) => ipcRenderer.invoke('fonts:data', id),
+  fontImport: (paths) => ipcRenderer.invoke('fonts:import', paths),
+  fontRemove: (id) => ipcRenderer.invoke('fonts:remove', id),
+  onFontsChanged: (cb) => ipcRenderer.on('fonts:changed', (e, added) => cb(added)),
+  pathForFile: (f) => { try { return webUtils.getPathForFile(f); } catch (e) { return ''; } },
+});

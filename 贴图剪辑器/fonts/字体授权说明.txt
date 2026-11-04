@@ -1,0 +1,8 @@
+贴图剪辑器内置字体，全部是 SIL Open Font License 1.1（OFL）开源字体，可以免费商用（包括做视频、发平台、商业推广），只是不能单独拿字体文件去卖。
+
+思源黑体 粗／特粗、思源宋体 粗（Noto Sans/Serif SC）  Google / Adobe   OFL 1.1
+站酷快乐体、站酷庆科黄油体、站酷小薇                   站酷 ZCOOL        OFL 1.1
+马善政毛笔                                           马善政            OFL 1.1
+得意黑 Smiley Sans                                   atelier-anchor    OFL 1.1
+霞鹜文楷 LXGW WenKai                                 LXGW              OFL 1.1
+龙藏体 Long Cang、志莽行书 Zhi Mang Xing、刘建毛草 Liu Jian Mao Cao   Google Fonts 收录   OFL 1.1

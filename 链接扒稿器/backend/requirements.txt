@@ -1,0 +1,7 @@
+yt-dlp
+funasr
+modelscope
+torch
+torchaudio
+opencc-python-reimplemented
+imageio-ffmpeg

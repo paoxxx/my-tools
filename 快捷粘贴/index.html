@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>快捷粘贴</title>
+<style>
+  :root{
+    --bg:#fffdf8; --ink:#2b2a27; --muted:#9a958a; --line:#e6e1d6; --panel:#ffffff;
+    --accent:#c2552d; --edit:#2d6cc2; --flash:#fff1b8; --shadow:0 8px 28px rgba(0,0,0,.14);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#232220; --ink:#ece8df; --muted:#8f8a80; --line:#3a3833; --panel:#2c2b28;
+      --accent:#e07a50; --edit:#6aa0e6; --flash:#5a4d1c; --shadow:0 8px 28px rgba(0,0,0,.5); }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif}
+  #wrap{position:fixed;inset:0;overflow:auto;padding:18px 20px 40px}
+  body.paste #wrap{cursor:copy}
+  #doc{min-height:100%;outline:none;font-size:14px;line-height:1.7;word-break:break-word}
+  #doc p{margin:0 0 .6em;white-space:pre-wrap}
+  body.paste #doc{caret-color:transparent}
+  #doc:empty::before{color:var(--muted)}
+  body.paste #doc:empty::before{content:"点一下窗口，就把剪贴板内容粘过来"}
+  body.edit  #doc:empty::before{content:"编辑模式：可以直接打字修改"}
+  .flash{background:var(--flash);transition:background 1.2s}
+  /* 回车后的“下一段”提示 */
+  #next{display:none;font-size:12px;color:var(--muted);margin-top:-.2em;user-select:none}
+  body.paste.pending #next{display:block}
+
+  /* 右上角悬浮齿轮 */
+  #gear{position:fixed;top:10px;right:12px;width:30px;height:30px;border-radius:50%;
+    border:1px solid var(--line);background:var(--panel);color:var(--muted);cursor:pointer;
+    display:flex;align-items:center;justify-content:center;opacity:.55;transition:opacity .2s;z-index:10}
+  #gear:hover,#gear.open{opacity:1;color:var(--ink)}
+  #gear svg{width:16px;height:16px}
+  #gear::after{content:"";position:absolute;right:1px;bottom:1px;width:8px;height:8px;border-radius:50%;
+    border:2px solid var(--panel)}
+  body.paste #gear::after{background:var(--accent)}
+  body.edit  #gear::after{background:var(--edit)}
+
+  #panel{position:fixed;top:48px;right:12px;width:240px;max-height:calc(100% - 60px);overflow:auto;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);
+    padding:10px;font-size:13px;display:none;z-index:10;user-select:none;cursor:default}
+  #panel.open{display:block}
+  .sec{padding:6px 2px 10px;border-bottom:1px solid var(--line)}
+  .sec:last-child{border-bottom:none;padding-bottom:2px}
+  .tit{font-size:11px;color:var(--muted);margin:2px 0 6px}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0}
+  .btns{display:flex;flex-wrap:wrap;gap:6px}
+  button,select,input[type=color]{font:inherit;font-size:12px;color:var(--ink);background:var(--bg);
+    border:1px solid var(--line);border-radius:7px;padding:4px 9px;cursor:pointer}
+  button:hover{border-color:var(--muted)}
+  input[type=color]{padding:1px;width:30px;height:26px}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;width:100%}
+  .seg button{flex:1;border:none;border-radius:0;background:transparent;padding:6px}
+  .seg button.on{color:#fff}
+  #mPaste.on{background:var(--accent)} #mEdit.on{background:var(--edit)}
+  .switch{position:relative;width:34px;height:20px;border-radius:10px;background:var(--line);cursor:pointer;flex:none}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
+  .switch.on{background:var(--accent)} .switch.on::after{left:16px}
+  .fmtbox{display:none} body.edit .fmtbox{display:block}
+  .keys{font-size:11px;color:var(--muted);line-height:1.7}
+  .stat{font-size:11px;color:var(--muted);margin-top:6px}
+  #toast{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);background:var(--ink);color:var(--bg);
+    padding:5px 12px;border-radius:16px;font-size:12px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:20}
+  #toast.show{opacity:.9}
+</style>
+</head>
+<body class="paste">
+  <div id="wrap">
+    <div id="doc" contenteditable="true" spellcheck="false"></div>
+    <div id="next">↵ 下一次粘贴另起一段</div>
+  </div>
+
+  <button id="gear" title="设置">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+
+  <div id="panel">
+    <div class="sec">
+      <div class="tit">模式（⌘E 切换）</div>
+      <div class="seg"><button id="mPaste">粘贴模式</button><button id="mEdit">编辑模式</button></div>
+      <div class="row"><span>每次粘贴自动另起一段</span><div class="switch" id="auto"></div></div>
+    </div>
+    <div class="sec">
+      <div class="tit">文字</div>
+      <div class="row"><span>字号</span>
+        <select id="size"><option>12</option><option>13</option><option selected>14</option><option>15</option><option>16</option><option>18</option><option>20</option></select></div>
+      <div class="row"><span>行距</span>
+        <select id="lh"><option value="1.5">1.5</option><option value="1.7" selected>1.7</option><option value="2">2.0</option></select></div>
+      <div class="row"><span>段落间距</span>
+        <select id="pg"><option value="0">无</option><option value=".6" selected>小</option><option value="1.2">大</option></select></div>
+      <div class="fmtbox">
+        <div class="tit" style="margin-top:8px">选中文字后设置</div>
+        <div class="btns">
+          <button data-cmd="bold"><b>加粗</b></button>
+          <button data-cmd="italic"><i>斜体</i></button>
+          <button data-cmd="underline"><u>下划线</u></button>
+          <input type="color" id="color" value="#c2552d" title="文字颜色">
+          <button data-cmd="removeFormat">清格式</button>
+        </div>
+      </div>
+    </div>
+    <div class="sec">
+      <div class="tit">操作</div>
+      <div class="btns">
+        <button id="undo">撤销</button>
+        <button id="copy">复制全文</button>
+        <button id="save">存为文本</button>
+        <button id="clear">清空</button>
+      </div>
+      <div class="row"><span>窗口置顶</span><div class="switch" id="top"></div></div>
+    </div>
+    <div class="sec keys">
+      单击窗口＝粘贴　回车＝下一段<br>⌘Z 撤销　⌘E 切换模式
+      <div class="stat" id="stat"></div>
+    </div>
+  </div>
+  <div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const doc = $('#doc');
+const S = { mode:'paste', auto:true, top:false, size:'14', lh:'1.7', pg:'.6' };
+let history = [], pasteCount = 0, pending = false;
+
+function load(){
+  try{
+    const saved = JSON.parse(localStorage.getItem('kjnt2') || '{}');
+    if (saved.html) doc.innerHTML = saved.html;
+    Object.assign(S, saved.s || {});
+    pasteCount = saved.n || 0;
+  }catch(e){}
+  $('#size').value = S.size; $('#lh').value = S.lh; $('#pg').value = S.pg;
+  applyStyle(); setMode(S.mode); setAuto(S.auto); stats();
+}
+function persist(){
+  try{ localStorage.setItem('kjnt2', JSON.stringify({ html: doc.innerHTML, s: S, n: pasteCount })); }catch(e){}
+  stats();
+}
+function plain(){
+  // 段与段之间换一行
+  const blocks = Array.from(doc.childNodes).map(n => n.nodeType===3 ? n.textContent : n.innerText);
+  return blocks.join('\n').replace(/\n+$/,'');
+}
+function stats(){
+  const t = doc.innerText.replace(/\s/g,'');
+  $('#stat').textContent = t.length + ' 字 · 已粘贴 ' + pasteCount + ' 次';
+}
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),1100); }
+function snap(){ history.push({h:doc.innerHTML, n:pasteCount, p:pending}); if (history.length>200) history.shift(); }
+function scrollEnd(){ const w=$('#wrap'); w.scrollTop = w.scrollHeight; }
+function applyStyle(){
+  doc.style.fontSize = S.size+'px'; doc.style.lineHeight = S.lh;
+  document.documentElement.style.setProperty('--pg', S.pg+'em');
+  doc.querySelectorAll('p').forEach(p=>p.style.marginBottom = S.pg+'em');
+}
+function setPending(on){ pending = on; document.body.classList.toggle('pending', on); }
+
+function setMode(m){
+  S.mode = m;
+  document.body.classList.remove('paste','edit'); document.body.classList.add(m);
+  $('#mPaste').classList.toggle('on', m==='paste');
+  $('#mEdit').classList.toggle('on', m==='edit');
+  if (m==='edit'){ doc.focus(); } else { window.getSelection().removeAllRanges(); doc.blur(); }
+  persist();
+}
+function setAuto(on){ S.auto = on; $('#auto').classList.toggle('on', on); persist(); }
+
+function lastPara(){
+  let last = doc.lastElementChild;
+  if (!last || last.tagName!=='P'){ last = document.createElement('p'); last.style.marginBottom = S.pg+'em'; doc.appendChild(last); }
+  return last;
+}
+function newPara(){ const p=document.createElement('p'); p.style.marginBottom = S.pg+'em'; doc.appendChild(p); return p; }
+
+async function doPaste(){
+  const { text } = await window.api.read();
+  if (!text){ toast('剪贴板里没有文字'); return; }
+  snap();
+  const empty = !doc.textContent.length;
+  const target = (empty || S.auto || pending) ? (empty ? lastPara() : newPara()) : lastPara();
+  const span = document.createElement('span');
+  span.textContent = text.replace(/\r\n?/g,'\n').replace(/\n+$/,'');
+  span.className = 'flash';
+  target.appendChild(span);
+  setPending(false);
+  setTimeout(()=>{ span.classList.remove('flash'); if(!span.className) span.removeAttribute('class'); persist(); }, 900);
+  pasteCount++; persist(); scrollEnd(); toast('已粘贴');
+}
+
+// 粘贴模式：单击窗口任意位置就粘贴（齿轮和设置面板除外）
+$('#wrap').addEventListener('mousedown', e=>{
+  if (e.button!==0) return;
+  if ($('#panel').classList.contains('open')){ closePanel(); e.preventDefault(); return; }
+  if (S.mode!=='paste') return;
+  e.preventDefault();
+  doPaste();
+});
+
+window.addEventListener('keydown', e=>{
+  const mod = e.metaKey || e.ctrlKey;
+  const k = e.key.toLowerCase();
+  if (mod && k==='e'){ e.preventDefault(); setMode(S.mode==='paste'?'edit':'paste'); return; }
+  if (e.key==='Escape'){ closePanel(); return; }
+  if (S.mode!=='paste') return;
+  if (e.key==='Enter'){
+    e.preventDefault();
+    if (!doc.textContent.length) return;
+    snap(); setPending(true); scrollEnd(); return;
+  }
+  if (mod && k==='z'){ e.preventDefault(); undo(); return; }
+  if (mod && k==='v'){ e.preventDefault(); doPaste(); return; }
+  if (e.key==='Backspace'){ e.preventDefault(); undo(); return; }
+  if (!mod && e.key.length===1) e.preventDefault();
+}, true);
+
+doc.addEventListener('input', ()=>{ if (S.mode==='edit') persist(); });
+doc.addEventListener('paste', e=>{
+  if (S.mode!=='edit') return;
+  e.preventDefault();
+  document.execCommand('insertText', false, (e.clipboardData||window.clipboardData).getData('text/plain'));
+});
+
+function undo(){
+  if (S.mode==='edit'){ document.execCommand('undo'); persist(); return; }
+  if (!history.length){ toast('没有可撤销的了'); return; }
+  const last = history.pop(); doc.innerHTML = last.h; pasteCount = last.n; setPending(last.p);
+  persist();
+}
+
+// 齿轮面板
+function closePanel(){ $('#panel').classList.remove('open'); $('#gear').classList.remove('open'); }
+$('#gear').onclick = e=>{ e.stopPropagation(); $('#panel').classList.toggle('open'); $('#gear').classList.toggle('open'); };
+
+$('#mPaste').onclick = ()=> setMode('paste');
+$('#mEdit').onclick = ()=> { setMode('edit'); };
+$('#auto').onclick = ()=> setAuto(!S.auto);
+$('#undo').onclick = undo;
+document.querySelectorAll('[data-cmd]').forEach(b=>{
+  b.onmousedown = e=> e.preventDefault();
+  b.onclick = ()=>{ document.execCommand(b.dataset.cmd); persist(); };
+});
+let savedSel = null;
+document.addEventListener('selectionchange', ()=>{
+  const s = window.getSelection();
+  if (s.rangeCount && doc.contains(s.anchorNode)) savedSel = s.getRangeAt(0).cloneRange();
+});
+$('#color').addEventListener('input', e=>{
+  if (savedSel){ const s=window.getSelection(); s.removeAllRanges(); s.addRange(savedSel); }
+  document.execCommand('styleWithCSS', false, true);
+  document.execCommand('foreColor', false, e.target.value);
+  persist();
+});
+$('#size').onchange = e=>{ S.size=e.target.value; applyStyle(); persist(); };
+$('#lh').onchange = e=>{ S.lh=e.target.value; applyStyle(); persist(); };
+$('#pg').onchange = e=>{ S.pg=e.target.value; applyStyle(); persist(); };
+$('#copy').onclick = async ()=>{ await window.api.write({ text: plain(), html: doc.innerHTML }); toast('全文已复制'); };
+$('#save').onclick = async ()=>{ if (await window.api.save(plain())) toast('已保存'); };
+$('#clear').onclick = ()=>{ if (!doc.textContent.trim()) return; snap(); doc.innerHTML=''; pasteCount=0; setPending(false); persist(); toast('已清空，⌘Z 可找回'); };
+$('#top').onclick = async ()=>{ S.top = await window.api.top(!S.top); $('#top').classList.toggle('on', S.top); };
+
+load();
+</script>
+</body>
+</html>

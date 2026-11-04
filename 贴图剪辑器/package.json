@@ -1,0 +1,14 @@
+{
+  "name": "tietu-editor",
+  "productName": "贴图剪辑器",
+  "version": "0.1.0",
+  "description": "快速给视频贴表情包、加字幕的小工具",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "install-electron --no"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "biji-ruanjian",
+  "productName": "Note Pro",
+  "version": "1.0.0",
+  "description": "上课板书、申论批改、自媒体笔记一体的笔记软件",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "install-app": "bash scripts/install-app.sh"
+  },
+  "devDependencies": {
+    "electron": "33.2.1"
+  }
+}

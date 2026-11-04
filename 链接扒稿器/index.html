@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>链接扒稿器</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --ink: #1d1d1f; --sub: #6e6e73; --line: #e3e3e0;
+    --accent: #ff4d2e; --accent-ink: #ffffff; --ok: #1f9d55; --err: #d93025;
+    --dy: #111111; --xhs: #ff2442; --bili: #00a1d6; --other: #8e8e93;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1c1e; --card: #2c2c2e; --ink: #f2f2f7; --sub: #a1a1a6; --line: #3a3a3c; --dy: #f2f2f7; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, "PingFang SC", sans-serif; display: flex; flex-direction: column; -webkit-user-select: none; }
+  header { height: 38px; -webkit-app-region: drag; display: flex; align-items: center; justify-content: center; font-weight: 600; color: var(--sub); font-size: 13px; flex: none; }
+  .composer { padding: 4px 14px 12px; flex: none; }
+  .box { position: relative; background: var(--card); border: 1.5px solid var(--line); border-radius: 12px; transition: border-color .15s; }
+  .box.drag { border-color: var(--accent); border-style: dashed; }
+  textarea { width: 100%; height: 92px; resize: none; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; padding: 10px 12px 40px; -webkit-user-select: text; }
+  textarea::placeholder { color: var(--sub); }
+  .go { position: absolute; right: 8px; bottom: 8px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-ink); font: 600 13px -apple-system, "PingFang SC"; padding: 6px 14px; cursor: pointer; }
+  .go:disabled { opacity: .35; cursor: default; }
+  .hint { position: absolute; left: 12px; bottom: 11px; font-size: 12px; color: var(--sub); }
+  main { flex: 1; overflow-y: auto; padding: 0 14px 14px; }
+  .sec { font-size: 12px; color: var(--sub); margin: 6px 2px 6px; }
+  .item { background: var(--card); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  .row1 { display: flex; align-items: center; gap: 6px; }
+  .pill { flex: none; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 5px; color: #fff; background: var(--other); }
+  .pill.抖音 { background: var(--dy); color: var(--bg); } .pill.小红书 { background: var(--xhs); } .pill.B站 { background: var(--bili); }
+  .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta { font-size: 12px; color: var(--sub); margin-top: 2px; }
+  .status { font-size: 12px; margin-top: 4px; color: var(--sub); white-space: pre-wrap; -webkit-user-select: text; }
+  .status.err { color: var(--err); } .status.ok { color: var(--ok); }
+  .status.run::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; animation: pulse 1s infinite ease-in-out; }
+  @keyframes pulse { 50% { opacity: .2; } }
+  .acts { display: flex; gap: 6px; margin-top: 8px; }
+  .acts button { border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 6px; font: 12px -apple-system, "PingFang SC"; padding: 3px 9px; cursor: pointer; }
+  .acts button:hover { border-color: var(--accent); color: var(--accent); }
+  footer { flex: none; border-top: 1px solid var(--line); padding: 7px 14px; font-size: 12px; color: var(--sub); display: flex; gap: 8px; align-items: center; }
+  footer .dir { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: rtl; text-align: left; cursor: pointer; }
+  footer button { border: 0; background: transparent; color: var(--accent); font: 12px -apple-system, "PingFang SC"; cursor: pointer; padding: 0; }
+  .panel { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 10; }
+  .panel.on { display: flex; }
+  .panel .body { flex: 1; overflow-y: auto; padding: 4px 18px 18px; }
+  .panel h3 { font-size: 13px; color: var(--sub); font-weight: 600; margin: 16px 0 8px; }
+  .opt { display: flex; gap: 10px; align-items: flex-start; background: var(--card); border: 1.5px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+  .opt.on { border-color: var(--accent); }
+  .opt input { margin-top: 4px; accent-color: var(--accent); }
+  .opt b { display: block; }
+  .opt small { color: var(--sub); font-size: 12px; }
+  .field { margin: 8px 0; }
+  .field label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 4px; }
+  .field input { width: 100%; border: 1.5px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); padding: 7px 10px; font: 13px -apple-system, "PingFang SC"; outline: 0; -webkit-user-select: text; }
+  .field input:focus { border-color: var(--accent); }
+  .note { font-size: 12px; color: var(--sub); line-height: 1.6; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btns button, .panel .bar button { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 8px; font: 13px -apple-system, "PingFang SC"; padding: 6px 12px; cursor: pointer; }
+  .btns button:hover { border-color: var(--accent); color: var(--accent); }
+  .panel .bar { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--line); }
+  .panel .bar .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .engine-tag { font-size: 11px; color: var(--sub); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; margin-left: 4px; }
+  .toast { position: fixed; left: 50%; top: 140px; transform: translate(-50%, -6px); background: var(--ink); color: var(--bg); font-size: 13px; padding: 7px 14px; border-radius: 18px; opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; z-index: 20; white-space: nowrap; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+  .toast.on { opacity: .94; transform: translate(-50%, 0); }
+  .toast.warn { background: var(--err); color: #fff; }
+  .empty { text-align: center; color: var(--sub); font-size: 13px; margin-top: 40px; line-height: 1.9; }
+</style>
+</head>
+<body>
+<header>链接扒稿器</header>
+<div class="composer">
+  <div class="box" id="box">
+    <textarea id="input" placeholder="粘贴抖音、小红书、B站的分享链接&#10;可以一次贴多条，一行一条；也可以把视频文件拖进来"></textarea>
+    <span class="hint">⌘↩ 开始</span>
+    <button class="go" id="go" disabled>扒稿</button>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<main id="list"></main>
+<footer>
+  <span>存到</span><span class="dir" id="dir" title="在访达中显示"></span><button id="change">更改</button><button id="gear">设置</button>
+</footer>
+<div class="panel" id="panel">
+  <header>设置</header>
+  <div class="body">
+    <h3>识别方式</h3>
+    <label class="opt" data-engine="sensevoice"><input type="radio" name="engine" value="sensevoice"><span><b>本地识别（免费）</b><small>阿里 SenseVoice，在你的 Mac 上运行，不限次数</small></span></label>
+    <label class="opt" data-engine="doubao"><input type="radio" name="engine" value="doubao"><span><b>豆包识别（更准）</b><small>火山引擎“豆包录音文件识别模型2.0”，支持热词，按时长计费；失败时自动改用本地识别</small></span></label>
+    <div id="volc">
+      <div class="field"><label>App ID</label><input id="appId" placeholder="火山引擎控制台里的 App ID"></div>
+      <div class="field"><label>Access Token</label><input id="token" type="password" placeholder="留空表示不修改"></div>
+      <div class="note" id="tokenState"></div>
+      <div class="btns" style="margin-top:8px"><button id="testVolc">保存并测试连接</button></div>
+      <div class="note" id="testResult" style="margin-top:6px"></div>
+    </div>
+    <h3>公考热词库</h3>
+    <div class="note">存在 Obsidian 的保存文件夹里。“热词”帮豆包认准专有名词，“纠错”两种识别方式都会自动替换。</div>
+    <div class="btns" style="margin-top:8px"><button id="wordbook">在 Obsidian 中打开热词库</button></div>
+    <h3>平台登录</h3>
+    <div class="note">小红书提示要登录时，点下面登录一次，扫码后关掉那个窗口就行，以后会一直记住。</div>
+    <div class="btns" style="margin-top:8px"><button data-login="xhs">登录小红书</button><button data-login="douyin">登录抖音</button></div>
+  </div>
+  <div class="bar"><button id="cancel">取消</button><button class="primary" id="save">保存</button></div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const input = $('#input'), go = $('#go'), list = $('#list');
+const jobs = new Map();   // 本次打开后新建的任务
+let history = [];
+let seq = 0;
+const started = new Map();   // 刚扒过的链接 → 时间，避免切回窗口时又自动填一遍
+
+const HAS_URL = /https?:\/\/\S+/;
+const PLATFORM = (t) => /douyin/.test(t) ? '抖音' : /xiaohongshu|xhslink/.test(t) ? '小红书' : /bilibili|b23\.tv/.test(t) ? 'B站' : '其他';
+
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function splitInput(text) {
+  const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const withUrl = lines.filter((l) => HAS_URL.test(l));
+  if (withUrl.length > 1) return withUrl;
+  return text.trim() ? [text.trim()] : [];
+}
+
+function addJobs(items) {
+  const batch = items.map((it) => {
+    const id = ++seq;
+    const job = { id, ...it, platform: it.file ? '本地文件' : PLATFORM(it.input), title: it.file ? it.file.split('/').pop() : '等待中……', status: '排队中', state: 'run' };
+    jobs.set(id, job);
+    return { id, input: it.input, file: it.file };
+  });
+  render();
+  window.api.enqueue(batch);
+}
+
+function start() {
+  const parts = splitInput(input.value);
+  if (!parts.length) return;
+  (input.value.match(LINK_RE) || []).forEach((u) => started.set(u, Date.now()));
+  input.value = ''; go.disabled = true;
+  addJobs(parts.map((p) => ({ input: p })));
+}
+
+window.api.onProgress((m) => {
+  const j = jobs.get(m.id); if (!j) return;
+  if (m.type === 'step') { j.status = m.text; j.state = 'run'; }
+  if (m.type === 'meta') { if (m.title) j.title = m.title; j.author = m.author; j.platform = m.platform; }
+  if (m.type === 'done') {
+    Object.assign(j, { title: m.title, author: m.author, platform: m.platform, path: m.path, state: 'ok', status: `已存进 Obsidian · ${m.chars}字 · ${m.engine || ''}识别` });
+    window.api.history().then((h) => { history = h; render(); });
+  }
+  if (m.type === 'error') { j.state = 'err'; j.status = m.text; if (j.title === '等待中……') j.title = '没扒下来'; }
+  render();
+});
+
+function card(x, live) {
+  const st = live ? `<div class="status ${x.state}">${esc(x.status)}</div>` : '';
+  const meta = [x.author, live ? '' : new Date(x.time).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }), !live && x.chars ? x.chars + '字' : ''].filter(Boolean).join(' · ');
+  const acts = x.path ? `<div class="acts">
+      <button data-act="open" data-path="${esc(x.path)}">打开笔记</button>
+      <button data-act="copy" data-path="${esc(x.path)}">复制逐字稿</button>
+      <button data-act="reveal" data-path="${esc(x.path)}">在访达中显示</button></div>` : '';
+  return `<div class="item"><div class="row1"><span class="pill ${esc(x.platform)}">${esc(x.platform)}</span><span class="title">${esc(x.title)}</span></div>
+    ${meta ? `<div class="meta">${esc(meta)}</div>` : ''}${st}${acts}</div>`;
+}
+
+function render() {
+  const live = [...jobs.values()].reverse();
+  const livePaths = new Set(live.map((j) => j.path).filter(Boolean));
+  const past = history.filter((h) => !livePaths.has(h.path)).slice(0, 30);
+  if (!live.length && !past.length) {
+    list.innerHTML = '<div class="empty">复制视频的分享链接，点一下这个窗口就自动粘贴好<br>点“扒稿”，逐字稿会按博主分文件夹存进 Obsidian</div>';
+    return;
+  }
+  list.innerHTML = (live.length ? '<div class="sec">本次</div>' + live.map((j) => card(j, true)).join('') : '')
+    + (past.length ? '<div class="sec">最近</div>' + past.map((h) => card(h, false)).join('') : '');
+}
+
+list.addEventListener('click', async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const p = b.dataset.path;
+  if (b.dataset.act === 'open') window.api.openNote(p);
+  if (b.dataset.act === 'reveal') window.api.reveal(p);
+  if (b.dataset.act === 'copy') {
+    const md = await window.api.readNote(p);
+    const m = md.match(/## 逐字稿\n+([\s\S]*?)(\n## |\s*$)/);
+    await window.api.copy(m ? m[1].trim() : md);
+    const old = b.textContent; b.textContent = '已复制'; setTimeout(() => (b.textContent = old), 1200);
+  }
+});
+
+input.addEventListener('input', () => { go.disabled = !input.value.trim(); });
+input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); start(); } });
+go.addEventListener('click', start);
+
+// ---- 点一下窗口就粘贴剪贴板里的链接（切回窗口时也会自动粘贴） ----
+const LINK_RE = /https?:\/\/[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/g;
+const toastEl = $('#toast');
+let toastTimer = 0, lastPasteAt = 0;
+function toast(text, warn) {
+  toastEl.textContent = text;
+  toastEl.classList.toggle('warn', !!warn);
+  toastEl.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('on'), 1600);
+}
+function caretToEnd() {
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  input.scrollTop = input.scrollHeight;
+}
+async function pasteClip(trigger) {
+  const now = Date.now();
+  if (now - lastPasteAt < 600) return;   // 切回窗口和点击几乎同时发生时只处理一次
+  lastPasteAt = now;
+  const text = (await window.api.readClipboard() || '').trim();
+  const url = (text.match(LINK_RE) || [])[0];
+  if (!url) { if (trigger === 'click') { toast('剪贴板里没有视频链接', true); caretToEnd(); } return; }
+  if (trigger === 'focus' && (PLATFORM(url) === '其他' || now - (started.get(url) || 0) < 10 * 60 * 1000)) return;
+  if (input.value.includes(url)) { if (trigger === 'click') toast('这条链接已经在输入框里了'); caretToEnd(); return; }
+  input.value = (input.value.trim() ? input.value.trim() + '\n' : '') + url;
+  go.disabled = false;
+  const n = (input.value.match(LINK_RE) || []).length;
+  const name = PLATFORM(url) === '其他' ? '链接' : PLATFORM(url) + '链接';
+  toast(n > 1 ? `已粘贴${name}，共${n}条` : `已粘贴${name}`, PLATFORM(url) === '其他');
+  caretToEnd();
+}
+window.addEventListener('focus', () => pasteClip('focus'));
+document.addEventListener('mousedown', (e) => {
+  if (panel.classList.contains('on')) return;
+  if (e.target.closest('button, .acts, footer, .panel, a')) return;
+  pasteClip('click');
+});
+
+// 拖入本地视频或音频
+const box = $('#box');
+['dragenter', 'dragover'].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); box.classList.add('drag'); }));
+['dragleave', 'drop'].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); if (ev === 'drop' || !e.relatedTarget) box.classList.remove('drag'); }));
+document.addEventListener('drop', (e) => {
+  const files = [...(e.dataTransfer?.files || [])].map((f) => window.api.pathOf(f)).filter(Boolean);
+  if (files.length) addJobs(files.map((f) => ({ file: f })));
+});
+
+// ---- 设置面板 ----
+const panel = $('#panel');
+function pickEngine(v) {
+  document.querySelectorAll('.opt').forEach((o) => { const on = o.dataset.engine === v; o.classList.toggle('on', on); o.querySelector('input').checked = on; });
+  $('#volc').style.display = v === 'doubao' ? '' : 'none';
+}
+document.querySelectorAll('.opt').forEach((o) => o.addEventListener('click', () => pickEngine(o.dataset.engine)));
+$('#gear').addEventListener('click', async () => {
+  const s = await window.api.settings();
+  pickEngine(s.engine || 'sensevoice');
+  $('#appId').value = s.volcAppId || '';
+  $('#token').value = '';
+  $('#tokenState').textContent = s.hasToken ? 'Access Token 已保存（加密存在本机钥匙串）' : '还没保存 Access Token';
+  panel.classList.add('on');
+});
+$('#cancel').addEventListener('click', () => panel.classList.remove('on'));
+$('#save').addEventListener('click', async () => {
+  const engine = document.querySelector('input[name=engine]:checked')?.value || 'sensevoice';
+  await window.api.saveEngine({ engine, appId: $('#appId').value, token: $('#token').value });
+  panel.classList.remove('on');
+});
+$('#wordbook').addEventListener('click', () => window.api.openWordbook());
+$('#testVolc').addEventListener('click', async () => {
+  const r = $('#testResult');
+  await window.api.saveEngine({ engine: 'doubao', appId: $('#appId').value, token: $('#token').value });
+  $('#token').value = '';
+  $('#tokenState').textContent = 'Access Token 已保存（加密存在本机钥匙串）';
+  r.style.color = ''; r.textContent = '测试中……';
+  const res = await window.api.testDoubao();
+  r.style.color = res.ok ? 'var(--ok)' : 'var(--err)';
+  r.textContent = res.text;
+});
+document.querySelectorAll('[data-login]').forEach((b) => b.addEventListener('click', () => window.api.login(b.dataset.login)));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') panel.classList.remove('on'); });
+
+async function showDir(d) { $('#dir').textContent = d; $('#dir').title = d; }
+$('#change').addEventListener('click', async () => showDir(await window.api.chooseDir()));
+$('#dir').addEventListener('click', async () => window.api.reveal((await window.api.settings()).outDir));
+
+(async () => {
+  showDir((await window.api.settings()).outDir);
+  history = await window.api.history();
+  render();
+  input.focus();
+})();
+</script>
+</body>
+</html>

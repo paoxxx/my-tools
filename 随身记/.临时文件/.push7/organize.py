@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""随身记·Mac后台自动整理
+
+每5分钟由macOS后台运行一次：
+1. 检查最近14天的随身记笔记，找出还没整理的录音；
+2. 等你停止说话3分钟后，调用Claude Code重新整理当天全部原文；
+3. 把整理结果写进笔记上方“整理版”区域，原文一个字不动。
+Mac关机期间没整理的，开机后会自动补上。
+
+手动立刻整理（不等3分钟）：python3 organize.py --now
+"""
+import datetime
+import fcntl
+import glob
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+FOLDER = os.path.expanduser(
+    "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Notes/1.日记和待办/随身记")
+PROXY = "http://127.0.0.1:7897"  # Clash Verge的混合代理端口；Claude Code要走代理才能用
+IDLE_SECONDS = 180
+DAYS_BACK = 14
+LOG = os.path.expanduser("~/Library/Logs/随身记整理.log")
+LOCK = os.path.expanduser("~/Library/Caches/suishenji-organizer.lock")
+
+START = "<!-- 整理版开始 -->"
+END = "<!-- 整理版结束 -->"
+MARK_RE = re.compile(r"<!-- 已整理到第(\d+)条 -->")
+ENTRY_RE = re.compile(r"^### (\d+)\. (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*$", re.M)
+WEEK = "一二三四五六日"
+
+
+def allow_icloud_download():
+    """后台程序默认不允许触发iCloud下载（读文件会报Resource deadlock avoided），这里给本进程打开"""
+    try:
+        import ctypes
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        # IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES=3, IOPOL_SCOPE_PROCESS=0, IOPOL_MATERIALIZE_DATALESS_FILES_ON=2
+        libc.setiopolicy_np(3, 0, 2)
+    except Exception:
+        pass
+
+
+def log(msg):
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    with open(LOG, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
+
+
+def find_claude():
+    extra = [
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.claude/local"),
+        os.path.expanduser("~/.npm-global/bin"),
+        "/opt/homebrew/bin", "/usr/local/bin",
+    ] + sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin")), reverse=True)
+    path = os.environ.get("PATH", "") + ":" + ":".join(extra)
+    os.environ["PATH"] = path
+    return shutil.which("claude", path=path)
+
+
+def read_glossary():
+    p = os.path.join(FOLDER, "词库.md")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def build_prompt(day, raw, glossary):
+    d = datetime.date.fromisoformat(day)
+    return f"""你是Bob的随身记整理助手。下面是他在{day}（星期{WEEK[d.weekday()]}）用手机语音转文字记下的原文，每段有编号和时间。请整理成“整理版”。
+
+要求：
+1. 整理成一份像待办清单一样的分类清单。类别按内容判断，比如“待办”“课程想法”“内容选题”“生活琐事”“灵感”等，每个类别用“#### 类别名”做小标题，没有内容的类别不写。“待办”有的话放最前面。
+2. 实在判断不了归哪一类的，统一放进最后的“#### 待分类”，不要硬塞进别的类别。
+3. 每一条都写成复选框：“- [ ] 要点内容（原文3 · 12:51）”，括号里标来源原文编号和时间（只写时和分）。一段原文说了好几件事，就拆成几条，分别归类。
+4. 参考下面的词库，修正语音识别错的词，特别是中英文混杂的词；修正明显的同音错字；把不通顺的句子理顺，去掉“这个”“然后”之类的口头语。但不改变Bob的原意，不添加原文没有的内容，不替他做判断。
+5. 原文里说到“明天”“下周三”“11月11日之前”这类时间，要保留，并在后面括号里换算出具体日期，比如“明天（11月5日）”；有截止时间的待办，把截止时间写在最前面。
+6. 标点全部用中文全角，不用破折号。
+7. 最前面用一句话写“今日一句话”，概括这一天记录的主要内容。直接写“今天主要……”，不要用“Bob”或第三人称。
+8. 只输出整理版正文，不要开场白，不要解释，不要用代码块包起来，不要再输出原文。
+
+【词库】
+{glossary or "（暂无）"}
+
+【原文】
+{raw}
+"""
+
+
+def call_claude(claude, prompt):
+    env = dict(os.environ)
+    if PROXY:
+        env.setdefault("HTTPS_PROXY", PROXY)
+        env.setdefault("HTTP_PROXY", PROXY)
+    with tempfile.TemporaryDirectory() as cwd:
+        r = subprocess.run([claude, "-p", "--output-format", "text"],
+                           input=prompt, capture_output=True, text=True,
+                           timeout=600, cwd=cwd, env=env)
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout).strip()[:500]
+        if "403" in msg or "onnect" in msg:
+            msg += "（请确认Clash Verge开着）"
+        raise RuntimeError(msg)
+    out = r.stdout.strip()
+    out = re.sub(r"^```[a-zA-Z]*\n", "", out)
+    out = re.sub(r"\n```$", "", out)
+    return out.strip()
+
+
+def ensure_block(content, day):
+    if START in content and END in content:
+        return content
+    block = f"## 整理版\n{START}\n（等待Mac整理）\n{END}\n\n"
+    i = content.find("## 原文")
+    if i >= 0:
+        return content[:i] + block + content[i:]
+    return block + content
+
+
+INBOXES = [os.path.join(FOLDER, ".收件箱"), os.path.join(FOLDER, "_收件箱")]  # 新版用隐藏文件夹，旧版的也一并处理
+TIME_RE = re.compile(r"^time: (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\s*$", re.M)
+
+
+def append_entry(day, stamp, text):
+    """把一条录音追加到当天笔记“原文”末尾；同一时间已存在就跳过（去重）"""
+    path = os.path.join(FOLDER, f"{day}.md")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+    else:
+        content = f"## 整理版\n{START}\n（等待Mac整理）\n{END}\n\n## 原文\n"
+    if f". {stamp}\n" in content:
+        return False
+    i = content.find("## 原文")
+    raw = content[i:] if i >= 0 else content
+    nums = [int(m.group(1)) for m in ENTRY_RE.finditer(raw)]
+    n = max(nums) + 1 if nums else 1
+    if not content.endswith("\n"):
+        content += "\n"
+    content += f"\n### {n}. {stamp}\n\n{text.strip()}\n"
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, path)
+    return True
+
+
+def merge_inbox():
+    """把手机放进收件箱的录音按时间顺序合并进当天笔记，合并后删掉小文件"""
+    items = []
+    for inbox in INBOXES:
+        if not os.path.isdir(inbox):
+            continue
+        try:
+            names = os.listdir(inbox)
+        except PermissionError:
+            log("没有权限读取iCloud里的收件箱：请在“系统设置→隐私与安全性→完全磁盘访问权限”里打开SuiShenJiOrganizer")
+            continue
+        for name in names:
+            full = os.path.join(inbox, name)
+            if name.endswith(".icloud"):
+                subprocess.run(["brctl", "download", os.path.join(inbox, name[1:-7])], capture_output=True)
+                continue
+            if not name.endswith(".md") or name.startswith("."):
+                continue
+            try:
+                with open(full, encoding="utf-8") as f:
+                    body = f.read()
+            except OSError as ex:
+                # 文件还在iCloud云端没下载下来：请求下载，下一分钟再读
+                subprocess.run(["brctl", "download", full], capture_output=True)
+                log(f"{name}：还在从iCloud下载（{ex.strerror}），下次再合并")
+                continue
+            m = TIME_RE.search(body)
+            if not m:
+                log(f"收件箱文件格式不对，跳过：{name}")
+                continue
+            items.append((f"{m.group(1)} {m.group(2)}", m.group(1), body[m.end():].strip(), full))
+    for stamp, day, text, full in sorted(items):
+        try:
+            added = append_entry(day, stamp, text) if text else False
+            os.remove(full)
+            log(f"{day}：收到录音 {stamp[11:]}" + ("" if added else "（已存在，跳过）"))
+        except Exception as ex:
+            log(f"合并收件箱失败：{os.path.basename(full)}：{ex}")
+    old = INBOXES[1]
+    if os.path.isdir(old):
+        try:
+            os.rmdir(old)  # 旧收件箱清空后删掉，不在Obsidian里占地方
+        except OSError:
+            pass
+
+
+def process(path, claude, force):
+    day = os.path.basename(path)[:-3]
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    nums = [int(m.group(1)) for m in ENTRY_RE.finditer(content)]
+    if not nums:
+        return
+    total = max(nums)
+    m = MARK_RE.search(content)
+    done = int(m.group(1)) if m else 0
+    if total <= done:
+        return
+    idle = time.time() - os.path.getmtime(path)
+    if not force and idle < IDLE_SECONDS:
+        log(f"{day}：有新录音，等你说完（{int(idle)}秒前有改动）")
+        return
+
+    i = content.find("## 原文")
+    raw = content[i + len("## 原文"):].strip() if i >= 0 else content
+    log(f"{day}：开始整理（共{total}条，之前整理到第{done}条）")
+    result = call_claude(claude, build_prompt(day, raw, read_glossary()))
+    if not result:
+        raise RuntimeError("Claude没有返回内容")
+
+    # 写回前重新读一次，避免覆盖手机刚追加的原文
+    with open(path, encoding="utf-8") as f:
+        content = ensure_block(f.read(), day)
+    s = content.index(START) + len(START)
+    e = content.index(END)
+    stamp = f"{datetime.datetime.now():%Y-%m-%d %H:%M}"
+    new_block = f"\n<!-- 已整理到第{total}条 -->\n> 自动整理于{stamp}，共{total}条原文\n\n{result}\n"
+    content = content[:s] + new_block + content[e:]
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, path)
+    log(f"{day}：整理完成")
+
+
+def main():
+    allow_icloud_download()
+    force = "--now" in sys.argv
+    os.makedirs(os.path.dirname(LOCK), exist_ok=True)
+    lock = open(LOCK, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return  # 上一次还在跑
+    if not os.path.isdir(FOLDER):
+        log(f"找不到文件夹：{FOLDER}")
+        return
+    merge_inbox()
+    claude = find_claude()
+    if not claude:
+        log("找不到claude命令，请确认Claude Code已安装")
+        return
+
+    today = datetime.date.today()
+    for k in range(DAYS_BACK):
+        day = (today - datetime.timedelta(days=k)).isoformat()
+        path = os.path.join(FOLDER, f"{day}.md")
+        placeholder = os.path.join(FOLDER, f".{day}.md.icloud")
+        if not os.path.exists(path):
+            if os.path.exists(placeholder):
+                subprocess.run(["brctl", "download", path], capture_output=True)
+                log(f"{day}：文件还在iCloud云端，已请求下载，下次再整理")
+            continue
+        try:
+            process(path, claude, force)
+        except Exception as ex:  # 单个文件失败不影响其他天
+            log(f"{day}：整理失败：{ex}")
+
+
+if __name__ == "__main__":
+    main()

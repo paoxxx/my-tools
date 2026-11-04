@@ -1,0 +1,9 @@
+{
+  "name": "link-transcriber",
+  "productName": "链接扒稿器",
+  "version": "1.1.4",
+  "main": "main.js",
+  "private": true,
+  "scripts": { "start": "electron ." },
+  "devDependencies": { "electron": "33.2.1" }
+}
