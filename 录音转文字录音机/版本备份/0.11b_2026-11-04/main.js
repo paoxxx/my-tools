@@ -1,0 +1,501 @@
+// 录音机：录音、豆包语音识别、点字回放
+const { globalShortcut, app, BrowserWindow, ipcMain, shell, systemPreferences, clipboard, dialog, session, Menu, desktopCapturer } = require('electron');
+// macOS 系统声音内录（需要 macOS 13 以上），必须在启动前打开
+app.commandLine.appendSwitch('enable-features', 'MacLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride');
+const path = require('path');
+const fs = require('fs');
+const zlib = require('zlib');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
+const { pathToFileURL } = require('url');
+const WebSocket = require('ws');
+
+app.setName('录音机');
+const SRC = path.join(__dirname, 'src');
+const dataDir = () => { const d = path.join(app.getPath('documents'), '录音机'); fs.mkdirSync(d, { recursive: true }); return d; };
+const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
+
+const DEFAULTS = {
+  appId: '', token: '', resourceId: 'volc.seedasr.sauc.duration',
+  lead: 0.3, usedSeconds: 0, quotaHours: 20, counter: 0,
+  exportDir: '', inputId: '', outputId: '', denoise: true, source: 'mic', hotkey: '', keepAlive: true, recTop: true, agc: false, boost: true, shareText: true, shareAudio: true, bounds: null,
+};
+function loadSettings() {
+  try { return Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(settingsFile(), 'utf8'))); } catch (e) { return Object.assign({}, DEFAULTS); }
+}
+function saveSettings(s) {
+  fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
+  fs.writeFileSync(settingsFile(), JSON.stringify(s, null, 2));
+}
+let settings = loadSettings();
+
+// ---------- 窗口 ----------
+let win;
+function createWindow(quiet) {
+  const b = settings.bounds || {};
+  win = new BrowserWindow({
+    width: b.width || 1000, height: b.height || 700, x: b.x, y: b.y, minWidth: 340, minHeight: 190,
+    titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 18 },
+    backgroundColor: '#ffffff', title: '录音机', show: !quiet,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, backgroundThrottling: false },
+  });
+  win.loadFile(path.join(SRC, 'index.html'));
+  win.on('close', () => { settings.bounds = win.getBounds(); saveSettings(settings); });
+  win.on('closed', () => { win = null; });
+  if (quiet) win.once('ready-to-show', () => { if (!app.getLoginItemSettings().wasOpenedAtLogin || quiet === 'hotkey') win.showInactive(); });
+}
+app.whenReady().then(() => {
+  session.defaultSession.setPermissionRequestHandler((wc, perm, cb) => cb(true));
+  session.defaultSession.setPermissionCheckHandler(() => true);
+  setTimeout(regHotkey, 500);
+  session.defaultSession.setDisplayMediaRequestHandler((req, cb) => {
+    desktopCapturer.getSources({ types: ['screen'] }).then((src) => cb({ video: src[0], audio: 'loopback' })).catch(() => cb({}));
+  });
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: '文件', submenu: [{ label: '导入音频或视频…', accelerator: 'CmdOrCtrl+O', click: () => { if (win) win.webContents.send('import:menu'); } }] },
+    { label: '录音机', submenu: [{ role: 'hide', label: '隐藏' }, { type: 'separator' }, { role: 'quit', label: '退出' }] },
+    { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
+    { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'reload', label: '重新载入' }] },
+  ]));
+  createWindow(app.getLoginItemSettings().wasOpenedAtLogin ? 'login' : false);
+  app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); else if (win && !win.isVisible()) win.show(); });
+});
+app.on('window-all-closed', () => { if (settings.keepAlive === false) app.quit(); });
+ipcMain.on('rec:state', (e, on) => {
+  if (!win || win.isDestroyed()) return;
+  if (on && settings.recTop !== false) {
+    if (win.isMinimized()) win.restore();
+    try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch (err) { /* 忽略 */ }
+    win.setAlwaysOnTop(true, 'floating');
+    if (!win.isVisible()) win.showInactive();
+    win.moveTop();
+    // 只跳到最前面一下，不一直置顶
+    setTimeout(() => {
+      if (!win || win.isDestroyed()) return;
+      try { win.setAlwaysOnTop(false); win.setVisibleOnAllWorkspaces(false); } catch (err) { /* 忽略 */ }
+      try { if (app.dock) app.dock.show(); } catch (err) { /* 忽略 */ }
+    }, 500);
+  } else if (!on) {
+    try { win.setAlwaysOnTop(false); win.setVisibleOnAllWorkspaces(false); } catch (err) { /* 忽略 */ }
+    try { if (app.dock) app.dock.show(); } catch (err) { /* 忽略 */ }
+  }
+});
+ipcMain.handle('login:set', (e, v) => { app.setLoginItemSettings({ openAtLogin: !!v }); return app.getLoginItemSettings().openAtLogin; });
+ipcMain.handle('login:get', () => app.getLoginItemSettings().openAtLogin);
+
+// ---------- 设置 ----------
+ipcMain.handle('settings:get', () => settings);
+ipcMain.handle('settings:set', (e, patch) => { settings = Object.assign(settings, patch); saveSettings(settings); if ('hotkey' in patch) regHotkey(); return settings; });
+// 全局快捷键：开始/停止录音（软件在后台也能用）
+function hotkeyFire() {
+  if (win && !win.isDestroyed()) {
+    if (!win.isVisible()) win.showInactive();
+    try { win.webContents.send('hotkey'); } catch (e) { /* 忽略 */ }
+  } else {
+    createWindow('hotkey');
+    win.webContents.once('did-finish-load', () => setTimeout(() => { try { win.webContents.send('hotkey'); } catch (e) { /* 忽略 */ } }, 700));
+  }
+}
+// 单按修饰键（如单按左 Option）：用系统级按键监听，只在“按下后没按别的键、很快松开”时触发
+const TAP_CODES = { AltLeft: 56, AltRight: 3640, MetaLeft: 3675, MetaRight: 3676, ControlLeft: 29, ControlRight: 3613, ShiftLeft: 42, ShiftRight: 54 };
+let tapLastOther = 0, tapCount = 0, tapLastTap = 0;
+let uio = null, tapTarget = 0, tapDown = false, tapDirty = false, tapT0 = 0, uioStarted = false;
+function loadUio() {
+  if (uio) return uio;
+  try {
+    uio = require('uiohook-napi').uIOhook;
+    uio.on('keydown', (e) => {
+      if (!tapTarget) return;
+      if (e.keycode === tapTarget) { if (!tapDown) { tapDown = true; tapDirty = Date.now() - tapLastOther < 300; tapT0 = Date.now(); } } else { tapLastOther = Date.now(); if (tapDown) tapDirty = true; }
+    });
+    uio.on('keyup', (e) => {
+      if (e.keycode !== tapTarget) { tapLastOther = Date.now(); return; }
+      if (!tapDown) return;
+      tapDown = false;
+      if (tapDirty || Date.now() - tapT0 > 400) { tapCount = 0; return; }
+      // Command 键太常和别的键一起用，要连按两下才触发；其他修饰键单按一下就行
+      const need = (tapTarget === 3675 || tapTarget === 3676) ? 2 : 1;
+      const now = Date.now();
+      tapCount = now - tapLastTap < 500 ? tapCount + 1 : 1;
+      tapLastTap = now;
+      if (tapCount >= need) { tapCount = 0; hotkeyFire(); }
+    });
+    uio.on('mousedown', () => { if (tapDown) tapDirty = true; });
+  } catch (err) { uio = null; }
+  return uio;
+}
+function regHotkey() {
+  globalShortcut.unregisterAll();
+  tapTarget = 0; tapDown = false;
+  const k = settings.hotkey;
+  if (!k) return true;
+  if (k.startsWith('tap:')) {
+    const code = TAP_CODES[k.slice(4)];
+    if (!code || !loadUio()) return false;
+    tapTarget = code;
+    if (!uioStarted) { try { uio.start(); uioStarted = true; } catch (err) { return false; } }
+    return true;
+  }
+  try { return globalShortcut.register(k, hotkeyFire); } catch (e) { return false; }
+}
+ipcMain.handle('hotkey:test', (e, k) => { const old = settings.hotkey; settings.hotkey = k; const ok = regHotkey(); if (!ok) { settings.hotkey = old; regHotkey(); } return ok; });
+
+// ---------- 麦克风 ----------
+ipcMain.handle('mic:ask', async () => {
+  if (process.platform !== 'darwin') return true;
+  const st = systemPreferences.getMediaAccessStatus('microphone');
+  if (st === 'granted') return true;
+  if (st === 'denied' || st === 'restricted') return false;
+  return await systemPreferences.askForMediaAccess('microphone');
+});
+ipcMain.handle('mic:settings', () => shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'));
+
+// ---------- 录音文件 ----------
+const metaPath = (id) => path.join(dataDir(), id + '.json');
+const audioPath = (m) => path.join(dataDir(), m.audioFile || (m.id + '.m4a'));
+const readMeta = (id) => JSON.parse(fs.readFileSync(metaPath(id), 'utf8'));
+const writeMeta = (m) => fs.writeFileSync(metaPath(m.id), JSON.stringify(m));
+const pad = (n) => String(n).padStart(2, '0');
+function newId(t) {
+  const d = t ? new Date(t) : new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+}
+function run(cmd, args) {
+  return new Promise((resolve, reject) => execFile(cmd, args, (err, so, se) => (err ? reject(new Error(se || err.message)) : resolve(so))));
+}
+function makeWav(pcm, sr) {
+  sr = sr || 16000;
+  const h = Buffer.alloc(44);
+  h.write('RIFF', 0); h.writeUInt32LE(36 + pcm.length, 4); h.write('WAVE', 8); h.write('fmt ', 12);
+  h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(sr, 24);
+  h.writeUInt32LE(sr * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
+}
+// 按块解析 wav，找到 data 块（系统转出来的 wav 文件头不一定是 44 字节）
+function parseWav(buf) {
+  let pos = 12;
+  while (pos + 8 <= buf.length) {
+    const id = buf.toString('ascii', pos, pos + 4);
+    let size = buf.readUInt32LE(pos + 4);
+    if (id === 'data') {
+      if (size === 0xffffffff || pos + 8 + size > buf.length) size = buf.length - pos - 8;
+      return buf.slice(pos + 8, pos + 8 + size);
+    }
+    pos += 8 + size + (size & 1);
+  }
+  return null;
+}
+
+ipcMain.handle('rec:list', () => {
+  const out = [];
+  for (const f of fs.readdirSync(dataDir())) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const m = JSON.parse(fs.readFileSync(path.join(dataDir(), f), 'utf8'));
+      out.push({ id: m.id, name: m.name, createdAt: m.createdAt, duration: m.duration, status: m.status });
+    } catch (e) { /* 跳过坏文件 */ }
+  }
+  return out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+});
+ipcMain.handle('rec:get', (e, id) => readMeta(id));
+ipcMain.handle('rec:audioUrl', (e, id) => ({ url: pathToFileURL(audioPath(readMeta(id))).href }));
+ipcMain.handle('rec:audioBytes', (e, id) => fs.readFileSync(audioPath(readMeta(id))));
+
+ipcMain.handle('rec:save', async (e, ab, wantId, sampleRate) => {
+  const pcm = Buffer.from(ab);
+  const sr = Number.isFinite(sampleRate) && sampleRate >= 8000 && sampleRate <= 96000 ? Math.round(sampleRate) : 16000;
+  let id = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(wantId || '') ? wantId : newId();
+  if (fs.existsSync(path.join(dataDir(), id + '.json'))) id = newId();
+  const wav = path.join(dataDir(), id + '.wav');
+  const m4a = path.join(dataDir(), id + '.m4a');
+  fs.writeFileSync(wav, makeWav(pcm, sr));
+  let audioFile = id + '.m4a';
+  try { await run('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', '-b', '96000', wav, m4a]); } catch (err) {
+    try { await run('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', wav, m4a]); } catch (err2) { audioFile = id + '.wav'; }
+  }
+  settings.counter = (settings.counter || 0) + 1;
+  saveSettings(settings);
+  const m = {
+    id, name: id, createdAt: new Date().toISOString(),
+    duration: pcm.length / (2 * sr), status: 'pending', audioFile, sampleRate: sr,
+  };
+  writeMeta(m);
+  return m;
+});
+
+ipcMain.handle('rec:remove', async (e, id) => {
+  for (const ext of ['m4a', 'wav', 'json']) {
+    const p = path.join(dataDir(), id + '.' + ext);
+    if (fs.existsSync(p)) await shell.trashItem(p);
+  }
+  return true;
+});
+
+// ---------- 豆包流式语音识别 ----------
+function frame(type, flags, ser, payload) {
+  const body = zlib.gzipSync(payload);
+  const head = Buffer.from([0x11, (type << 4) | flags, (ser << 4) | 1, 0]);
+  const size = Buffer.alloc(4); size.writeUInt32BE(body.length);
+  return Buffer.concat([head, size, body]);
+}
+function parseFrame(buf) {
+  const type = buf[1] >> 4, flags = buf[1] & 15, ser = buf[2] >> 4, comp = buf[2] & 15;
+  let off = 4;
+  if (type === 15) {
+    const code = buf.readUInt32BE(off); off += 4;
+    const n = buf.readUInt32BE(off); off += 4;
+    return { error: code, msg: buf.slice(off, off + n).toString() };
+  }
+  if (flags & 1) off += 4;
+  if (flags & 4) off += 4;
+  const n = buf.readUInt32BE(off); off += 4;
+  let p = buf.slice(off, off + n);
+  if (comp === 1) p = zlib.gunzipSync(p);
+  return { last: !!(flags & 2), json: ser === 1 ? JSON.parse(p.toString()) : null };
+}
+function errKind(m) {
+  return m.error === 45000292 || /quota|exceed|limit|额度|欠费|arrear|balance|expire|过期|insufficient/i.test(m.msg) ? 'quota' : /auth|token|forbidden|permission|resource|unauthor|invalid.*(app|key|token)/i.test(m.msg) ? 'auth' : 'other';
+}
+function asr(pcm, onProgress) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket('wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream', {
+      headers: {
+        'X-Api-App-Key': settings.appId, 'X-Api-Access-Key': settings.token,
+        'X-Api-Resource-Id': settings.resourceId, 'X-Api-Connect-Id': crypto.randomUUID(),
+      },
+    });
+    let lastJson = null, done = false, timer = null;
+    const finish = (r) => { if (done) return; done = true; clearTimeout(timer); try { ws.close(); } catch (e) { /* 忽略 */ } resolve(r); };
+    ws.on('unexpected-response', (req, res) => { const a = res.statusCode === 403 || res.statusCode === 401; finish({ error: (a ? '鉴权失败（HTTP ' : 'HTTP ') + res.statusCode + (a ? '）' : ''), kind: a ? 'auth' : 'other' }); });
+    ws.on('error', (err) => finish({ error: '网络错误：' + err.message }));
+    ws.on('open', async () => {
+      const req = {
+        user: { uid: 'luyinji' }, audio: { format: 'pcm', rate: 16000, bits: 16, channel: 1, codec: 'raw' },
+        request: { model_name: 'bigmodel', enable_itn: true, enable_punc: true, show_utterances: true, result_type: 'full' },
+      };
+      ws.send(frame(1, 0, 1, Buffer.from(JSON.stringify(req))));
+      const CH = 6400;
+      for (let i = 0; i < pcm.length; i += CH) {
+        if (done) return;
+        const last = i + CH >= pcm.length;
+        ws.send(frame(2, last ? 2 : 0, 0, pcm.slice(i, i + CH)));
+        onProgress(Math.min(90, Math.round((i / pcm.length) * 90)));
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      timer = setTimeout(() => finish({ error: '识别超时' }), 90000);
+    });
+    ws.on('message', (data) => {
+      let m;
+      try { m = parseFrame(data); } catch (err) { return finish({ error: '解析失败：' + err.message }); }
+      if (m.error) return finish({ error: m.error + ' ' + m.msg, kind: errKind(m) });
+      if (m.json) lastJson = m.json;
+      if (m.last) finish({ json: lastJson });
+    });
+  });
+}
+
+ipcMain.handle('rec:transcribe', async (e, id) => {
+  const send = (pct) => { try { e.sender.send('trans:progress', { id, pct }); } catch (err) { /* 窗口已关 */ } };
+  if (!settings.appId || !settings.token) return { ok: false, error: '请先点齿轮，填入 App ID 和 Token', kind: 'auth' };
+  const m = readMeta(id);
+  const wav = path.join(dataDir(), id + '.wav');
+  const tmp = path.join(app.getPath('temp'), id + '_16k.wav');
+  let pcm = null;
+  try {
+    // 不管录音是多少采样率，统一转成 16k 单声道再识别
+    await run('/usr/bin/afconvert', ['-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1', fs.existsSync(wav) ? wav : audioPath(m), tmp]);
+    pcm = parseWav(fs.readFileSync(tmp));
+  } catch (err) {
+    return { ok: false, error: '音频转换失败：' + err.message, kind: 'other' };
+  } finally { fs.rmSync(tmp, { force: true }); }
+  if (!pcm || pcm.length < 3200) return { ok: false, error: '录音太短或没有声音', kind: 'other' };
+  send(1);
+  const r = await asr(pcm, send);
+  if (r.error) { m.status = 'error'; m.error = r.error; m.errorKind = r.kind; writeMeta(m); return { ok: false, error: r.error, kind: r.kind }; }
+  const res = (r.json && r.json.result) || {};
+  m.utterances = res.utterances || [];
+  m.text = res.text || '';
+  m.status = 'done';
+  delete m.error; delete m.errorKind;
+  m.duration = m.duration || pcm.length / 32000;
+  writeMeta(m);
+  if (fs.existsSync(wav)) fs.rmSync(wav, { force: true });
+  settings.usedSeconds = (settings.usedSeconds || 0) + pcm.length / 32000;
+  saveSettings(settings);
+  send(100);
+  return { ok: true, meta: m };
+});
+
+
+// ---------- 边录边识别（双向流式）----------
+let live = null;
+function liveClose() { if (live) { try { live.ws.close(); } catch (e) { /* 忽略 */ } live = null; } }
+ipcMain.handle('live:start', (e) => {
+  liveClose();
+  if (!settings.appId || !settings.token) return { ok: false };
+  const L = { sender: e.sender, ready: false, buf: Buffer.alloc(0), json: null, err: null, finished: false, closed: false, wake: null };
+  live = L;
+  const ws = L.ws = new WebSocket('wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async', {
+    headers: { 'X-Api-App-Key': settings.appId, 'X-Api-Access-Key': settings.token, 'X-Api-Resource-Id': settings.resourceId, 'X-Api-Connect-Id': crypto.randomUUID() },
+  });
+  const wake = () => { if (L.wake) { const f = L.wake; L.wake = null; f(); } };
+  const flush = () => {
+    if (!L.ready || L.closed) return;
+    while (L.buf.length >= 6400) { try { ws.send(frame(2, 0, 0, L.buf.slice(0, 6400))); } catch (err) { return; } L.buf = L.buf.slice(6400); }
+  };
+  L.flush = flush;
+  ws.on('unexpected-response', (req, res) => { const a = res.statusCode === 403 || res.statusCode === 401; L.err = { error: (a ? '鉴权失败（HTTP ' : 'HTTP ') + res.statusCode + (a ? '）' : ''), kind: a ? 'auth' : 'other' }; L.closed = true; wake(); });
+  ws.on('error', (err) => { L.err = L.err || { error: '网络错误：' + err.message, kind: 'other' }; L.closed = true; wake(); });
+  ws.on('close', () => { L.closed = true; wake(); });
+  ws.on('open', () => {
+    const req = {
+      user: { uid: 'luyinji' }, audio: { format: 'pcm', rate: 16000, bits: 16, channel: 1, codec: 'raw' },
+      request: { model_name: 'bigmodel', enable_itn: true, enable_punc: true, show_utterances: true, result_type: 'full' },
+    };
+    ws.send(frame(1, 0, 1, Buffer.from(JSON.stringify(req))));
+    L.ready = true; flush();
+  });
+  ws.on('message', (data) => {
+    let m;
+    try { m = parseFrame(data); } catch (err) { L.err = { error: '解析失败：' + err.message, kind: 'other' }; wake(); return; }
+    if (m.error) { L.err = { error: m.error + ' ' + m.msg, kind: errKind(m) }; wake(); return; }
+    if (m.json) {
+      L.json = m.json;
+      const r = m.json.result || {};
+      try { L.sender.send('live:text', { text: r.text || '' }); } catch (err) { /* 窗口已关 */ }
+    }
+    if (m.last) { L.finished = true; wake(); }
+  });
+  return { ok: true };
+});
+ipcMain.on('live:chunk', (e, ab) => {
+  if (!live) return;
+  live.buf = Buffer.concat([live.buf, Buffer.from(ab)]);
+  live.flush();
+});
+ipcMain.handle('live:stop', async () => {
+  const L = live; if (!L) return { ok: false, error: '没有实时识别' };
+  try {
+    if (!L.closed) {
+      if (!L.ready) await new Promise((r) => { const t = setTimeout(r, 3000); L.wake = () => { clearTimeout(t); r(); }; });
+      L.flush();
+      if (L.ready && !L.closed) {
+        try { L.ws.send(frame(2, 2, 0, L.buf)); } catch (err) { /* 忽略 */ }
+        L.buf = Buffer.alloc(0);
+        if (!L.finished && !L.closed) await new Promise((r) => { const t = setTimeout(r, 8000); L.wake = () => { clearTimeout(t); r(); }; });
+      }
+    }
+  } finally { liveClose(); }
+  if (L.err) return { ok: false, error: L.err.error, kind: L.err.kind };
+  const res = L.json && L.json.result;
+  if (!L.finished || !res || !Array.isArray(res.utterances) || !res.utterances.length) return { ok: false, error: '实时识别没有拿到完整结果', kind: 'other' };
+  return { ok: true, json: L.json };
+});
+ipcMain.handle('rec:attach', (e, id, json) => {
+  const m = readMeta(id);
+  const res = (json && json.result) || {};
+  m.utterances = res.utterances || []; m.text = res.text || '';
+  m.status = 'done'; delete m.error; delete m.errorKind;
+  writeMeta(m);
+  const wav = path.join(dataDir(), id + '.wav');
+  if (fs.existsSync(wav)) fs.rmSync(wav, { force: true });
+  settings.usedSeconds = (settings.usedSeconds || 0) + (m.duration || 0);
+  saveSettings(settings);
+  return { ok: true, meta: m };
+});
+
+
+// ---------- 导入音频/视频文件（拖进窗口或 ⌘O）----------
+const FFMPEGS = ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'];
+function wavHead(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const b = Buffer.alloc(8192); const n = fs.readSync(fd, b, 0, 8192, 0);
+    let pos = 12, sr = 0, dataAt = -1;
+    while (pos + 8 <= n) {
+      const id = b.toString('ascii', pos, pos + 4), size = b.readUInt32LE(pos + 4);
+      if (id === 'fmt ') sr = b.readUInt32LE(pos + 12);
+      if (id === 'data') { dataAt = pos + 8; break; }
+      pos += 8 + size + (size & 1);
+    }
+    if (!sr || dataAt < 0) return null;
+    return { sr, dur: (fs.statSync(file).size - dataAt) / (sr * 2) };
+  } finally { fs.closeSync(fd); }
+}
+ipcMain.handle('rec:import', async (e, file) => {
+  if (!file || !fs.existsSync(file)) return { ok: false, error: '找不到这个文件' };
+  let t = Date.now(), id = newId(t);
+  while (fs.existsSync(path.join(dataDir(), id + '.json'))) { t += 1000; id = newId(t); }
+  const wav = path.join(dataDir(), id + '.wav'), m4a = path.join(dataDir(), id + '.m4a');
+  let done = false;
+  try { await run('/usr/bin/afconvert', ['-f', 'WAVE', '-d', 'LEI16@24000', '-c', '1', file, wav]); done = true; } catch (err) { fs.rmSync(wav, { force: true }); }
+  if (!done) {
+    const ff = FFMPEGS.find((f) => fs.existsSync(f));
+    if (ff) { try { await run(ff, ['-y', '-i', file, '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', wav]); done = true; } catch (err) { fs.rmSync(wav, { force: true }); } }
+  }
+  if (!done) return { ok: false, error: '这个文件读不了。支持 mp3、m4a、wav、aac、flac、mp4、mov 等；mkv、webm、ogg 等需要先安装 ffmpeg，或先转成 mp4/m4a' };
+  const h = wavHead(wav);
+  if (!h || h.dur < 0.3) { fs.rmSync(wav, { force: true }); return { ok: false, error: '没有读到声音（视频可能没有音轨）' }; }
+  let audioFile = id + '.m4a';
+  try { await run('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', '-b', '64000', wav, m4a]); } catch (err) {
+    try { await run('/usr/bin/afconvert', ['-f', 'm4af', '-d', 'aac', wav, m4a]); } catch (err2) { audioFile = id + '.wav'; }
+  }
+  const m = { id, name: path.basename(file, path.extname(file)) || id, createdAt: new Date().toISOString(), duration: h.dur, status: 'pending', audioFile, sampleRate: h.sr, source: path.basename(file) };
+  writeMeta(m);
+  return { ok: true, meta: m };
+});
+ipcMain.handle('import:pick', async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'], filters: [{ name: '音频或视频', extensions: ['mp3', 'm4a', 'wav', 'aac', 'flac', 'caf', 'aiff', 'mp4', 'mov', 'm4v', 'mkv', 'webm', 'ogg', 'opus', 'avi', 'amr'] }] });
+  return r.canceled ? [] : r.filePaths;
+});
+
+// ---------- 复制、导出、分享 ----------
+ipcMain.handle('copy', (e, text) => { clipboard.writeText(text); return true; });
+
+function filesToClipboard(files) {
+  if (process.platform !== 'darwin') return;
+  const items = files.map((f) => `<string>${f.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</string>`).join('');
+  const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><array>${items}</array></plist>`;
+  try { clipboard.writeBuffer('NSFilenamesPboardType', Buffer.from(plist)); } catch (err) { /* 忽略 */ }
+}
+ipcMain.handle('pick:exportDir', async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return settings.exportDir;
+  settings.exportDir = r.filePaths[0]; saveSettings(settings);
+  return settings.exportDir;
+});
+const safeName = (n) => String(n).replace(/[\/:*?"<>|]/g, '_').slice(0, 80) || 'audio';
+ipcMain.handle('export', async (e, { id, text }) => {
+  if (!settings.exportDir || !fs.existsSync(settings.exportDir)) {
+    const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
+    if (r.canceled || !r.filePaths[0]) return { ok: false };
+    settings.exportDir = r.filePaths[0]; saveSettings(settings);
+  }
+  const m = readMeta(id);
+  const nm = safeName(m.name || id);
+  const files = [];
+  const t = path.join(settings.exportDir, nm + '.txt');
+  fs.writeFileSync(t, text); files.push(t);
+  const a = audioPath(m);
+  if (fs.existsSync(a)) { const dst = path.join(settings.exportDir, nm + path.extname(a)); fs.copyFileSync(a, dst); files.push(dst); }
+  shell.showItemInFolder(files[0]);
+  return { ok: true, dir: settings.exportDir };
+});
+ipcMain.handle('share', async (e, { id, text }) => {
+  const m = readMeta(id);
+  const nm = safeName(m.name || id);
+  const files = [];
+  if (settings.shareText && text) {
+    const d = path.join(dataDir(), '分享'); fs.mkdirSync(d, { recursive: true });
+    const t = path.join(d, nm + '.txt'); fs.writeFileSync(t, text); files.push(t);
+  }
+  if (settings.shareAudio && fs.existsSync(audioPath(m))) {
+    const d = path.join(dataDir(), '分享'); fs.mkdirSync(d, { recursive: true });
+    const dst = path.join(d, nm + path.extname(audioPath(m)));
+    try { fs.copyFileSync(audioPath(m), dst); files.push(dst); } catch (err) { files.push(audioPath(m)); }
+  }
+  if (!files.length) return { ok: false, msg: '设置里没有勾选分享内容' };
+  filesToClipboard(files);
+  const ok = await new Promise((resolve) => execFile('open', ['-a', 'WeChat', ...files], (err) => resolve(!err)));
+  return ok ? { ok: true } : { ok: false, msg: '没找到微信' };
+});

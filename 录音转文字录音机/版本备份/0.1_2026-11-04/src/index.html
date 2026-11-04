@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>录音机</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" class="collapsed">
+  <aside id="sidebar">
+    <div class="side-head">所有录音</div>
+    <div id="list"></div>
+  </aside>
+
+  <main id="main">
+    <header id="top">
+      <div id="title">新录音</div>
+      <div id="tools">
+        <button class="ib" id="bShare" data-icon="share"></button>
+        <button class="ib" id="bExport" data-icon="export"></button>
+        <button class="ib" id="bCopy" data-icon="copy"></button>
+        <button class="ib" id="bQuote" data-icon="quote"></button>
+        <button class="ib" id="bGear" data-icon="gear"></button>
+        <button class="ib" id="bTrash" data-icon="trash"></button>
+      </div>
+    </header>
+
+    <section id="stage">
+      <div id="viewArea">
+        <div id="waveView">
+          <div id="zoomWrap">
+            <canvas id="zoom"></canvas>
+            <div id="playhead"><i class="dot top"></i><i class="dot bot"></i></div>
+          </div>
+          <canvas id="ticks"></canvas>
+        </div>
+        <div id="textView" hidden></div>
+      </div>
+
+      <div id="overWrap">
+        <div id="overBox"><canvas id="over"></canvas><div id="overHead"></div></div>
+        <div class="ends"><span id="tStart">0:00</span><span id="tEnd">0:00</span></div>
+      </div>
+      <div id="bigTime">00:00.00</div>
+      <div id="controls">
+        <button class="cb" id="bBack" data-icon="back15"></button>
+        <button class="cb play" id="bPlay" data-icon="play"></button>
+        <button class="cb" id="bFwd" data-icon="fwd15"></button>
+      </div>
+    </section>
+  </main>
+
+  <button class="ib" id="bSide" data-icon="sidebar"></button>
+  <div id="dock"><button id="recBtn" aria-label="record"><i></i></button></div>
+  <div id="toast" hidden></div>
+
+  <div id="settings" hidden>
+    <div class="sheet">
+      <div class="sheet-head"><b>设置</b><button class="ib" id="sClose" data-icon="close"></button></div>
+      <div class="grp">
+        <label>语音识别 App ID<input id="sAppId" autocomplete="off" spellcheck="false"></label>
+        <label>Token<input id="sToken" type="password" autocomplete="off" spellcheck="false"></label>
+        <label>Resource Id
+          <select id="sRes">
+            <option value="volc.seedasr.sauc.duration">豆包流式识别 2.0（volc.seedasr.sauc.duration）</option>
+            <option value="volc.bigasr.sauc.duration">豆包流式识别 1.0（volc.bigasr.sauc.duration）</option>
+          </select>
+        </label>
+      </div>
+      <div class="grp">
+        <div class="row"><span>已用时长</span><span id="sUsed">0 分钟 / 20 小时</span>
+          <button class="ib sm" id="sReset" data-icon="reset"></button></div>
+        <div class="bar"><i id="sBar"></i></div>
+        <label class="inline">总额（小时）<input id="sQuota" type="number" min="1" step="1"></label>
+      </div>
+      <div class="grp">
+        <label class="inline">回放提前量（秒）<input id="sLead" type="number" min="0" max="2" step="0.1"></label>
+        <div class="row"><span>导出文件夹</span><span id="sDir" class="path"></span>
+          <button class="ib sm" id="sPick" data-icon="folder"></button></div>
+        <div class="row"><span>分享内容</span>
+          <label class="chk"><input type="checkbox" id="sShareText">文字</label>
+          <label class="chk"><input type="checkbox" id="sShareAudio">录音</label></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="segment.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

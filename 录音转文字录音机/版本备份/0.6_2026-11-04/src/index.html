@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>录音机</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" class="collapsed">
+  <aside id="sidebar">
+    <div class="side-head">所有录音</div>
+    <div id="list"></div>
+  </aside>
+
+  <main id="main">
+    <header id="top">
+      <div id="title">新录音</div>
+      <div id="tools">
+        <button class="ib" id="bShare" data-icon="share"></button>
+        <button class="ib" id="bExport" data-icon="export"></button>
+        <button class="ib" id="bCopy" data-icon="copy"></button>
+        <button class="ib" id="bQuote" data-icon="quote"></button>
+        <button class="ib" id="bGear" data-icon="gear"></button>
+        <button class="ib" id="bTrash" data-icon="trash"></button>
+      </div>
+    </header>
+
+    <section id="stage">
+      <div id="viewArea">
+        <div id="waveView">
+          <div id="zoomWrap">
+            <canvas id="zoom"></canvas>
+            <div id="playhead"><i class="dot top"></i><i class="dot bot"></i></div>
+          </div>
+          <canvas id="ticks"></canvas>
+        </div>
+        <div id="textView" hidden></div>
+      </div>
+
+      <div id="overWrap">
+        <div id="overBox"><canvas id="over"></canvas><div id="overHead"></div></div>
+        <div class="ends"><span id="tStart">0:00</span><span id="tEnd">0:00</span></div>
+      </div>
+      <div id="bigTime">00:00.00</div>
+      <div id="controls">
+        <button class="cb" id="bBack" data-icon="back15"></button>
+        <button class="cb play" id="bPlay" data-icon="play"></button>
+        <button class="cb" id="bFwd" data-icon="fwd15"></button>
+      </div>
+    </section>
+  </main>
+
+  <button class="ib" id="bSide" data-icon="sidebar"></button>
+  <div id="dock"><button id="recBtn" aria-label="record"><i></i></button></div>
+  <div id="toast" hidden></div>
+  <div id="alert" hidden><span id="alertText"></span><button class="ib sm" id="alertGo" data-icon="gear"></button><button class="ib sm" id="alertX" data-icon="close"></button></div>
+
+  <div id="settings" hidden>
+    <div class="sheet">
+      <div class="sheet-head"><b>设置</b><button class="ib" id="sClose" data-icon="close"></button></div>
+      <div class="grp">
+        <label>语音识别 App ID<input id="sAppId" autocomplete="off" spellcheck="false"></label>
+        <label>Token<input id="sToken" type="password" autocomplete="off" spellcheck="false"></label>
+        <label>Resource Id
+          <select id="sRes">
+            <option value="volc.seedasr.sauc.duration">豆包流式识别 2.0（volc.seedasr.sauc.duration）</option>
+            <option value="volc.bigasr.sauc.duration">豆包流式识别 1.0（volc.bigasr.sauc.duration）</option>
+          </select>
+        </label>
+      </div>
+      <div class="grp">
+        <div class="row"><span>已用（小时）</span><input id="sUsedH" type="number" min="0" step="0.01"><span id="sQuotaTxt"></span>
+          <button class="ib sm" id="sReset" data-icon="reset"></button></div>
+        <div class="hint">多个软件共用同一个账号时，这里只统计本软件，可手动改成火山引擎控制台显示的数字</div>
+        <div class="bar"><i id="sBar"></i></div>
+        <label class="inline">总额（小时）<input id="sQuota" type="number" min="1" step="1"></label>
+      </div>
+      <div class="grp">
+        <div class="row"><span>开始/停止录音快捷键</span><button class="ib sm" id="sHot" style="width:auto;padding:0 12px;min-width:110px">未设置</button><button class="ib sm" id="sHotClr" data-icon="reset"></button></div>
+        <div class="hint">点按钮后按下想用的组合键（要带 ⌃ ⌥ ⌘ 中至少一个，或用 F1 到 F12）；软件在后台也能触发</div>
+        <label>录音来源<select id="sSource">
+          <option value="mic">麦克风</option>
+          <option value="system">系统内录（腾讯会议等，只录电脑播放的声音）</option>
+          <option value="both">内录 + 麦克风</option>
+        </select></label>
+        <div class="hint">内录需要在“系统设置 → 隐私与安全性 → 录屏与系统录音”里允许录音机，授权后重启软件</div>
+        <label>麦克风（输入）<select id="sIn"></select></label>
+        <div class="row"><button class="ib sm" id="bMeter" data-icon="mic"></button><div class="meter"><i id="mBar"></i></div><span id="mName" class="path"></span></div>
+        <label>扬声器（输出）<select id="sOut"></select></label>
+        <div class="row"><button class="ib sm" id="bBeep" data-icon="speaker"></button><span class="hint">点喇叭听一声提示音，确认声音从哪里出来</span></div>
+      </div>
+      <div class="grp">
+        <label class="inline">降噪（压低环境底噪）<input type="checkbox" id="sDenoise"></label>
+        <label class="inline">自动增益（会让声音忽大忽小，建议关）<input type="checkbox" id="sAgc"></label>
+        <label class="inline">录完自动提高音量（不影响录音时的波形）<input type="checkbox" id="sBoost"></label>
+      </div>
+      <div class="grp">
+        <label class="inline">回放提前量（秒）<input id="sLead" type="number" min="0" max="2" step="0.1"></label>
+        <div class="row"><span>导出文件夹</span><span id="sDir" class="path"></span>
+          <button class="ib sm" id="sPick" data-icon="folder"></button></div>
+        <div class="row"><span>分享内容</span>
+          <label class="chk"><input type="checkbox" id="sShareText">文字</label>
+          <label class="chk"><input type="checkbox" id="sShareAudio">录音</label></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="segment.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
